@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Data and generated outputs
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+/reports/*
+!/reports/.gitkeep
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

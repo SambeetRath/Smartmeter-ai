@@ -1,0 +1,92 @@
+# SmartMeter AI
+
+SmartMeter AI is a production-minded portfolio project for energy-analytics and anomaly detection built around the UCI Individual Household Electric Power Consumption dataset. This repository currently focuses on Milestone 1: ingesting raw smart-meter CSV data, validating input quality, and producing deterministic quality reports.
+
+## Dataset source and attribution
+
+The project uses the UCI Individual Household Electric Power Consumption dataset:
+
+- Source: https://archive.ics.uci.edu/dataset/235/individual+household+electric+power+consumption
+- License: the dataset is distributed for research and education use; please review the UCI dataset terms before redistribution.
+
+The raw file should be placed in `data/raw/household_power_consumption.txt` and kept out of Git. Do not commit the dataset itself or any secrets.
+
+## Project layout
+
+```text
+smartmeter-ai/
+├── data/
+│   ├── raw/
+│   └── processed/
+├── reports/
+├── src/
+│   └── smartmeter/
+│       ├── __init__.py
+│       ├── config.py
+│       ├── logging_config.py
+│       ├── ingestion/
+│       └── validation/
+├── tests/
+├── .env.example
+├── .gitignore
+├── README.md
+├── pyproject.toml
+├── requirements.txt
+└── .github/
+```
+
+## Local setup
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+For runtime-only dependencies without an editable install, use
+`python -m pip install -r requirements.txt`. PyArrow is the Parquet engine used by the pipeline.
+
+## Downloading the dataset
+
+1. Open the UCI dataset page and save the household power consumption file locally.
+2. Place it in `data/raw/household_power_consumption.txt`.
+3. Keep the original file unchanged for auditability.
+
+If the dataset is absent, the pipeline raises a clear `FileNotFoundError` with setup instructions instead of silently generating fake data.
+
+## Running the quality pipeline
+
+```powershell
+.\.venv\Scripts\python.exe -m smartmeter.ingestion.loader
+```
+
+When the dataset is available, the loader validates the schema, normalizes the timestamps, and writes:
+
+- Processed Parquet data to `data/processed/household_power_consumption.parquet`
+- Machine-readable quality report to `reports/quality_report.json`
+
+Set `SMARTMETER_PROCESSED_DATASET_PATH` to override the Parquet output path. The source file
+remains unchanged, and all input rows (including rows with missing measurements) are retained.
+
+The report separates missing measurements, data-quality violations, and exploratory outlier
+flags. Outliers use a global 1.5x IQR baseline; this does not account for time-of-day or seasonal
+patterns. A flagged value is a statistical prompt for investigation, not a confirmed anomaly.
+
+## Tests
+
+```powershell
+pytest -q
+```
+
+## Milestone 1 status
+
+Implemented and validated:
+
+- schema validation for the UCI electricity dataset
+- timestamp and value parsing
+- missing-value, duplicate, interval, negative-value, and outlier detection
+- deterministic quality reporting
+- test fixtures covering valid and invalid file content
+
+Planned future milestones include PostgreSQL persistence, anomaly models, API services, the dashboard, and the LLM assistant.

@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    environment:
+      SMARTMETER_DATASET_PATH: ./data/raw/household_power_consumption.txt
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    command: python -m smartmeter.ingestion.loader
