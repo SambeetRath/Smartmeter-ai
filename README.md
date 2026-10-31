@@ -22,6 +22,7 @@ identifier `uci_household_1`.
   Isolation Forest, evaluation utilities, and a chronological end-to-end detection pipeline.
 - `src/smartmeter/database/`: SQLAlchemy models, PostgreSQL connection/session management and repositories.
 - `src/smartmeter/services/database_ingestion.py`: streams Parquet row batches into PostgreSQL.
+- `src/smartmeter/api/`: FastAPI application foundation and database-independent health route.
 - `alembic/`: versioned database schema migrations.
 - `tests/unit/` and `tests/integration/`: database-independent tests and opt-in real PostgreSQL tests.
 
@@ -38,6 +39,28 @@ cd "C:\Users\sambe\SmartMeter AI"
 Runtime dependencies are pinned in `requirements.txt`; the editable install includes development
 tools from the `dev` extra. The Parquet pipeline and database importer require PyArrow, SQLAlchemy,
 Alembic, and Psycopg 3.
+
+## Milestone 4, Phase 1: API foundation
+
+The API currently provides only a liveness endpoint; it does not depend on PostgreSQL, and importing
+the application does not open a database connection. OpenAPI is available at `/openapi.json`,
+Swagger UI at `/docs`, and ReDoc at `/redoc`.
+
+Start the local development server on loopback:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn smartmeter.api.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+In another PowerShell window, check health and the OpenAPI document:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/openapi.json
+```
+
+The health response is `{"status":"ok","service":"smartmeter-ai"}`. This endpoint confirms
+application liveness only; it does not report database readiness.
 
 ## Milestone 1: data pipeline
 
