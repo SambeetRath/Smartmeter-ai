@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from smartmeter.api.routes.health import router as health_router
+from smartmeter.api.routes.readings import router as readings_router
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
     application.include_router(health_router)
+    application.include_router(readings_router)
 
     @application.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:

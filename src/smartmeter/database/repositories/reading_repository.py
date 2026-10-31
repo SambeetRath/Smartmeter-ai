@@ -81,16 +81,22 @@ class ReadingRepository:
         *,
         limit: int = 1_000,
         offset: int = 0,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> list[MeterReading]:
-        """Return an ordered, bounded page of readings for one meter."""
+        """Return an ordered, bounded page of readings, optionally within [start, end)."""
         _validate_page(limit, offset)
-        statement = (
-            select(MeterReading)
-            .where(MeterReading.meter_id == meter_id)
-            .order_by(MeterReading.timestamp)
-            .limit(limit)
-            .offset(offset)
-        )
+        start_utc = _utc_datetime(start) if start is not None else None
+        end_utc = _utc_datetime(end) if end is not None else None
+        if start_utc is not None and end_utc is not None and start_utc >= end_utc:
+            raise ValueError("start must be earlier than end.")
+
+        statement = select(MeterReading).where(MeterReading.meter_id == meter_id)
+        if start_utc is not None:
+            statement = statement.where(MeterReading.timestamp >= start_utc)
+        if end_utc is not None:
+            statement = statement.where(MeterReading.timestamp < end_utc)
+        statement = statement.order_by(MeterReading.timestamp).limit(limit).offset(offset)
         return list(session.scalars(statement).all())
 
     def get_in_range(
@@ -109,18 +115,14 @@ class ReadingRepository:
         end_utc = _utc_datetime(end)
         if start_utc >= end_utc:
             raise ValueError("start must be earlier than end.")
-        statement = (
-            select(MeterReading)
-            .where(
-                MeterReading.meter_id == meter_id,
-                MeterReading.timestamp >= start_utc,
-                MeterReading.timestamp < end_utc,
-            )
-            .order_by(MeterReading.timestamp)
-            .limit(limit)
-            .offset(offset)
+        return self.get_for_meter(
+            session,
+            meter_id,
+            limit=limit,
+            offset=offset,
+            start=start_utc,
+            end=end_utc,
         )
-        return list(session.scalars(statement).all())
 
     def count_for_meter(self, session: Session, meter_id: int) -> int:
         """Count readings for one meter."""

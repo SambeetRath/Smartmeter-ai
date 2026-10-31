@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import UniqueConstraint
 
+from smartmeter.database import connection
 from smartmeter.database.config import get_database_url, get_ingestion_batch_size
 from smartmeter.database.models import Meter, MeterReading
 from smartmeter.services.database_ingestion import (
@@ -43,6 +44,26 @@ def test_database_url_can_be_built_from_compose_environment_safely():
     assert url.startswith("postgresql+psycopg://")
     assert "safe%40password" in url
     assert "@postgres:5432/meter_db" in url
+
+
+def test_database_engine_bounds_connection_attempts(monkeypatch):
+    captured = {}
+    sentinel_engine = object()
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return sentinel_engine
+
+    monkeypatch.setattr(connection, "create_engine", fake_create_engine)
+
+    engine = connection.create_database_engine("postgresql+psycopg://localhost/meter_db")
+
+    assert engine is sentinel_engine
+    assert captured["connect_args"] == {
+        "options": "-c timezone=UTC",
+        "connect_timeout": 5,
+    }
 
 
 def test_ingestion_batch_size_must_be_positive():

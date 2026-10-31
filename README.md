@@ -42,25 +42,45 @@ Alembic, and Psycopg 3.
 
 ## Milestone 4, Phase 1: API foundation
 
-The API currently provides only a liveness endpoint; it does not depend on PostgreSQL, and importing
-the application does not open a database connection. OpenAPI is available at `/openapi.json`,
-Swagger UI at `/docs`, and ReDoc at `/redoc`.
+The API provides a database-independent liveness endpoint and a bounded, read-only readings
+endpoint. Importing the application does not open a database connection. OpenAPI is available at
+`/openapi.json`, Swagger UI at `/docs`, and ReDoc at `/redoc`.
 
-Start the local development server on loopback:
+Start the API from the project root or another working directory with:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn smartmeter.api.main:app --host 127.0.0.1 --port 8000 --reload
+.\run_api.ps1
 ```
 
-In another PowerShell window, check health and the OpenAPI document:
+The launcher reads `DATABASE_URL` from `.env` without displaying it, uses the project virtual
+environment, and runs without automatic reload. Stop any previous API instance before starting
+another one on port 8000. `/health` remains database-independent; `/readings` requires the
+configured, migrated PostgreSQL database.
+
+The local API documentation and health URLs are:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health
-Invoke-RestMethod http://127.0.0.1:8000/openapi.json
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8000/redoc
+http://127.0.0.1:8000/openapi.json
+http://127.0.0.1:8000/health
 ```
 
 The health response is `{"status":"ok","service":"smartmeter-ai"}`. This endpoint confirms
 application liveness only; it does not report database readiness.
+
+For example, query readings from PowerShell with:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/readings?meter_identifier=uci_household_1&limit=10"
+```
+
+`GET /readings` requires `meter_identifier`. Optional `start` and `end` parameters must be
+ISO-8601 timestamps that include a UTC offset; they are normalized to UTC and define the
+half-open interval `[start, end)`. Results are ordered by timestamp and limited to at most 1,000
+per page. Responses preserve missing measurements as JSON `null` and include `has_more` and
+`next_offset` pagination fields. Reading requests require a configured, migrated PostgreSQL
+database; an unknown meter returns 404.
 
 ## Milestone 1: data pipeline
 

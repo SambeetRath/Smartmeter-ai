@@ -19,7 +19,7 @@ def create_database_engine(database_url: str | None = None) -> Engine:
         pool_size=5,
         max_overflow=10,
         pool_timeout=30,
-        connect_args={"options": "-c timezone=UTC"},
+        connect_args={"options": "-c timezone=UTC", "connect_timeout": 5},
     )
 
 
