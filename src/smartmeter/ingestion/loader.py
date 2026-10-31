@@ -91,9 +91,7 @@ def load_dataset(
 
     missing_columns = [col for col in required_columns if col not in frame.columns]
     if missing_columns:
-        raise ValueError(
-            "Dataset is missing required columns: " + ", ".join(missing_columns)
-        )
+        raise ValueError("Dataset is missing required columns: " + ", ".join(missing_columns))
 
     for column in NUMERIC_COLUMNS:
         if column in frame.columns:

@@ -63,8 +63,7 @@ def test_missing_measurement_values_are_reported():
     report = validate_dataset(frame)
 
     assert any(
-        item["column"] == "global_active_power"
-        for item in report["issues"]["missing_measurements"]
+        item["column"] == "global_active_power" for item in report["issues"]["missing_measurements"]
     )
 
 
@@ -119,12 +118,10 @@ def test_negative_values_and_non_finite_values_are_reported():
     report = validate_dataset(frame)
 
     assert any(
-        item["column"] == "global_active_power"
-        for item in report["issues"]["negative_readings"]
+        item["column"] == "global_active_power" for item in report["issues"]["negative_readings"]
     )
     assert any(
-        item["column"] == "global_active_power"
-        for item in report["issues"]["non_finite_values"]
+        item["column"] == "global_active_power" for item in report["issues"]["non_finite_values"]
     )
 
 

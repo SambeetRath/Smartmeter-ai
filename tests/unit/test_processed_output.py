@@ -7,11 +7,7 @@ import pandas as pd
 
 from smartmeter.ingestion.loader import run_pipeline
 
-FIXTURE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "fixtures"
-    / "synthetic_valid_household.csv"
-)
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "synthetic_valid_household.csv"
 MEASUREMENT_COLUMNS = [
     "global_active_power",
     "global_reactive_power",
@@ -46,10 +42,7 @@ def test_pipeline_writes_complete_parquet_and_quality_summary(tmp_path):
     assert saved.columns.tolist() == dataset.columns.tolist()
     assert saved["timestamp"].is_monotonic_increasing
     assert pd.api.types.is_datetime64_any_dtype(saved["timestamp"])
-    assert all(
-        pd.api.types.is_numeric_dtype(saved[column])
-        for column in MEASUREMENT_COLUMNS
-    )
+    assert all(pd.api.types.is_numeric_dtype(saved[column]) for column in MEASUREMENT_COLUMNS)
     assert saved["global_active_power"].isna().sum() == 1
     assert report["quality_summary"]["input_row_count"] == len(source)
     assert report["quality_summary"]["processed_row_count"] == len(source)

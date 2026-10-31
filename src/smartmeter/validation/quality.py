@@ -5,6 +5,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from smartmeter.anomaly_detection.statistical import detect_global_iqr
+
 
 def _empty_report() -> dict[str, Any]:
     return {
@@ -41,36 +43,20 @@ def summarize_quality_report(report: dict[str, Any]) -> str:
 
 
 def _evaluate_outliers(frame: pd.DataFrame, columns: list[str]) -> list[dict[str, Any]]:
-    flags: list[dict[str, Any]] = []
-    for column in columns:
-        if column not in frame.columns:
-            continue
-        series = pd.to_numeric(frame[column], errors="coerce")
-        series = series.replace([np.inf, -np.inf], np.nan).dropna()
-        if series.empty or len(series) < 4 or series.nunique() < 2:
-            continue
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
-        iqr = q3 - q1
-        if np.isclose(iqr, 0.0):
-            continue
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        outlier_mask = (series < lower_bound) | (series > upper_bound)
-        if not outlier_mask.any():
-            continue
-        for idx, value in series[outlier_mask].items():
-            flags.append(
-                {
-                    "column": column,
-                    "row_index": int(idx),
-                    "value": float(value),
-                    "lower_bound": float(lower_bound),
-                    "upper_bound": float(upper_bound),
-                    "method": "iqr_1.5x",
-                }
-            )
-    return flags
+    if not columns:
+        return []
+    detections = detect_global_iqr(frame, columns=columns, iqr_multiplier=1.5)
+    return [
+        {
+            "column": detection["column"],
+            "row_index": int(frame.index[int(detection["row_index"])]),
+            "value": float(detection["value"]),
+            "lower_bound": float(detection["lower_bound"]),
+            "upper_bound": float(detection["upper_bound"]),
+            "method": "iqr_1.5x",
+        }
+        for detection in detections.to_dict(orient="records")
+    ]
 
 
 def validate_dataset(frame: pd.DataFrame, *, expected_frequency_minutes: int = 1) -> dict[str, Any]:
@@ -98,9 +84,7 @@ def validate_dataset(frame: pd.DataFrame, *, expected_frequency_minutes: int = 1
         "time_range_start": (
             frame["timestamp"].min().isoformat() if has_valid_timestamps else None
         ),
-        "time_range_end": (
-            frame["timestamp"].max().isoformat() if has_valid_timestamps else None
-        ),
+        "time_range_end": (frame["timestamp"].max().isoformat() if has_valid_timestamps else None),
         "expected_frequency_minutes": expected_frequency_minutes,
     }
 
@@ -108,11 +92,13 @@ def validate_dataset(frame: pd.DataFrame, *, expected_frequency_minutes: int = 1
     for column in numeric_columns:
         missing_count = int(frame[column].isna().sum())
         if missing_count:
-            missing_measurements.append({
-                "column": column,
-                "missing_count": missing_count,
-                "missing_pct": round((missing_count / len(frame)) * 100, 2),
-            })
+            missing_measurements.append(
+                {
+                    "column": column,
+                    "missing_count": missing_count,
+                    "missing_pct": round((missing_count / len(frame)) * 100, 2),
+                }
+            )
     report["issues"]["missing_measurements"] = missing_measurements
 
     invalid_timestamps = []
@@ -123,8 +109,7 @@ def validate_dataset(frame: pd.DataFrame, *, expected_frequency_minutes: int = 1
                 {
                     "row_index": int(row_index),
                     "raw_value": (
-                        str(frame.loc[row_index, "date"]) + " "
-                        + str(frame.loc[row_index, "time"])
+                        str(frame.loc[row_index, "date"]) + " " + str(frame.loc[row_index, "time"])
                     ),
                 }
                 for row_index in frame.index[invalid_mask]
@@ -199,15 +184,11 @@ def validate_dataset(frame: pd.DataFrame, *, expected_frequency_minutes: int = 1
         column: sum(flag["column"] == column for flag in suspicious_outliers)
         for column in numeric_columns
     }
-    negative_counts = {
-        column: int((frame[column] < 0).sum()) for column in numeric_columns
-    }
+    negative_counts = {column: int((frame[column] < 0).sum()) for column in numeric_columns}
     non_finite_counts = {}
     for column in numeric_columns:
         numeric_series = pd.to_numeric(frame[column], errors="coerce")
-        finite_mask = np.isfinite(
-            numeric_series.to_numpy(dtype=float, na_value=np.nan)
-        )
+        finite_mask = np.isfinite(numeric_series.to_numpy(dtype=float, na_value=np.nan))
         non_finite_counts[column] = int(
             (numeric_series.notna() & ~pd.Series(finite_mask, index=frame.index)).sum()
         )

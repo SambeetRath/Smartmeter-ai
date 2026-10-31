@@ -1,11 +1,48 @@
-version: "3.9"
-
 services:
-  app:
-    build: .
+  postgres:
+    image: postgres:17-alpine
     environment:
-      SMARTMETER_DATASET_PATH: ./data/raw/household_power_consumption.txt
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./data:/app/data
-      - ./reports:/app/reports
-    command: python -m smartmeter.ingestion.loader
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - smartmeter-db
+    restart: unless-stopped
+
+  ingest:
+    build: .
+    profiles: ["ingestion"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PORT: "5432"
+      SMARTMETER_DB_HOST: postgres
+      SMARTMETER_PARQUET_PATH: /app/data/processed/household_power_consumption.parquet
+      SMARTMETER_METER_IDENTIFIER: ${SMARTMETER_METER_IDENTIFIER:-uci_household_1}
+      SMARTMETER_INGESTION_BATCH_SIZE: ${SMARTMETER_INGESTION_BATCH_SIZE:-5000}
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - smartmeter-db
+    command: ["python", "-m", "smartmeter.services.database_ingestion"]
+
+volumes:
+  postgres_data:
+
+networks:
+  smartmeter-db:
+    driver: bridge
