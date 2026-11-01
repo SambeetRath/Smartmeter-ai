@@ -1,0 +1,5 @@
+from datetime import timedelta
+
+MAX_DETECTION_RANGE = timedelta(days=90)
+MAX_DETECTION_READINGS = 100_000
+MAX_ACTIVE_DETECTION_RUNS_PER_METER = 1

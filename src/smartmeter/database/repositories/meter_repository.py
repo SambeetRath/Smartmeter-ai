@@ -35,3 +35,9 @@ class MeterRepository:
     def get_by_identifier(self, session: Session, meter_identifier: str) -> Meter | None:
         """Find a meter by its unique identifier."""
         return session.scalar(select(Meter).where(Meter.meter_identifier == meter_identifier))
+
+    def lock_by_identifier(self, session: Session, meter_identifier: str) -> Meter | None:
+        """Find and lock a meter row to serialize per-meter job submissions."""
+        return session.scalar(
+            select(Meter).where(Meter.meter_identifier == meter_identifier).with_for_update()
+        )

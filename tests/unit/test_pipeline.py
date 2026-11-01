@@ -90,6 +90,27 @@ def test_pipeline_runs_all_detectors_with_one_consistent_sparse_schema():
         )
 
 
+def test_pipeline_can_emit_complete_predictions_for_persistent_storage():
+    run = run_anomaly_pipeline(
+        _frame(80),
+        config=_config(
+            detector_names=("global_iqr",),
+            include_normal_predictions=True,
+        ),
+    )
+
+    detector_summary = run.summary["detectors"]["global_iqr"]
+    assert len(run.results) == detector_summary["evaluated_observations"]
+    assert "normal" in set(run.results["result_kind"])
+    assert {"normal", "anomaly"}.issuperset(set(run.results["result_kind"]))
+    assert detector_summary["anomaly_predictions"] + detector_summary[
+        "normal_predictions_omitted_from_csv"
+    ] + detector_summary["unavailable_predictions"] == len(run.results)
+    assert run.summary["result_output_policy"] == "All available normal predictions are emitted."
+    assert not any("Sparse CSV omits" in item for item in run.summary["limitations"])
+    json.dumps(run.summary)
+
+
 @pytest.mark.parametrize("detector_name", DETECTOR_NAMES)
 def test_pipeline_runs_each_detector_independently(detector_name):
     run = run_anomaly_pipeline(
@@ -303,6 +324,7 @@ def test_pipeline_reproducibility_for_fixed_isolation_forest_configuration():
 def test_postgresql_reader_uses_bounded_ordered_pages_and_preserves_nulls(monkeypatch):
     rows = [
         SimpleNamespace(
+            id=100 + position,
             timestamp=timestamp,
             **{
                 column: (None if column == "global_active_power" and position == 2 else 1.0)
@@ -320,6 +342,10 @@ def test_postgresql_reader_uses_bounded_ordered_pages_and_preserves_nulls(monkey
         def __exit__(self, *_args):
             return False
 
+        def connection(self, *, execution_options):
+            assert execution_options == {"isolation_level": "REPEATABLE READ"}
+            return self
+
     class FakeSessionFactory:
         def __call__(self):
             return FakeSession()
@@ -329,10 +355,14 @@ def test_postgresql_reader_uses_bounded_ordered_pages_and_preserves_nulls(monkey
             return SimpleNamespace(id=12)
 
     class FakeReadingRepository:
-        def count_for_meter(self, _session, _meter_id):
+        def count_for_meter(self, _session, _meter_id, *, start=None, end=None):
+            assert start is None
+            assert end is None
             return len(rows)
 
-        def get_for_meter(self, _session, _meter_id, *, limit, offset):
+        def get_for_meter(self, _session, _meter_id, *, limit, offset, start=None, end=None):
+            assert start is None
+            assert end is None
             page_offsets.append(offset)
             return rows[offset : offset + limit]
 
@@ -349,12 +379,22 @@ def test_postgresql_reader_uses_bounded_ordered_pages_and_preserves_nulls(monkey
         "test-meter",
         session_factory=FakeSessionFactory(),
         page_size=2,
+        include_reading_ids=True,
     )
 
     assert len(loaded) == 5
+    assert loaded["id"].tolist() == [100, 101, 102, 103, 104]
     assert page_offsets == [0, 2, 4]
     assert loaded["timestamp"].is_monotonic_increasing
     assert pd.isna(loaded.loc[2, "global_active_power"])
+    with pytest.raises(ValueError, match="maximum permitted count of 4"):
+        load_postgresql_dataset(
+            "test-meter",
+            session_factory=FakeSessionFactory(),
+            page_size=2,
+            max_rows=4,
+        )
+    assert page_offsets == [0, 2, 4]
 
 
 def test_pipeline_config_rejects_invalid_detector_and_iqr_threshold():

@@ -124,14 +124,26 @@ class ReadingRepository:
             end=end_utc,
         )
 
-    def count_for_meter(self, session: Session, meter_id: int) -> int:
-        """Count readings for one meter."""
-        return int(
-            session.scalar(
-                select(func.count(MeterReading.id)).where(MeterReading.meter_id == meter_id)
-            )
-            or 0
-        )
+    def count_for_meter(
+        self,
+        session: Session,
+        meter_id: int,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> int:
+        """Count a meter's readings, optionally within the half-open interval [start, end)."""
+        start_utc = _utc_datetime(start) if start is not None else None
+        end_utc = _utc_datetime(end) if end is not None else None
+        if start_utc is not None and end_utc is not None and start_utc >= end_utc:
+            raise ValueError("start must be earlier than end.")
+
+        statement = select(func.count(MeterReading.id)).where(MeterReading.meter_id == meter_id)
+        if start_utc is not None:
+            statement = statement.where(MeterReading.timestamp >= start_utc)
+        if end_utc is not None:
+            statement = statement.where(MeterReading.timestamp < end_utc)
+        return int(session.scalar(statement) or 0)
 
     def summary_for_meter(self, session: Session, meter_id: int) -> ReadingSummary:
         """Return count and active-power aggregate statistics for a meter."""

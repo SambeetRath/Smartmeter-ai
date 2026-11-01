@@ -40,6 +40,26 @@ services:
       - smartmeter-db
     command: ["python", "-m", "smartmeter.services.database_ingestion"]
 
+  detection-worker:
+    build: .
+    profiles: ["detection"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PORT: "5432"
+      SMARTMETER_DB_HOST: postgres
+      SMARTMETER_DETECTION_POLL_SECONDS: ${SMARTMETER_DETECTION_POLL_SECONDS:-2}
+      SMARTMETER_DETECTION_LEASE_SECONDS: ${SMARTMETER_DETECTION_LEASE_SECONDS:-120}
+      SMARTMETER_DETECTION_HEARTBEAT_SECONDS: ${SMARTMETER_DETECTION_HEARTBEAT_SECONDS:-20}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - smartmeter-db
+    restart: unless-stopped
+    command: ["python", "-m", "smartmeter.services.detection_worker"]
+
 volumes:
   postgres_data:
 

@@ -109,6 +109,7 @@ class PipelineConfig:
         )
     )
     overwrite: bool = False
+    include_normal_predictions: bool = False
 
     def __post_init__(self) -> None:
         if self.source not in ("parquet", "postgresql"):
@@ -186,6 +187,8 @@ class PipelineConfig:
             raise TypeError("isolation_forest_config must be an IsolationForestConfig.")
         if not isinstance(self.overwrite, bool):
             raise TypeError("overwrite must be a boolean.")
+        if not isinstance(self.include_normal_predictions, bool):
+            raise TypeError("include_normal_predictions must be a boolean.")
         for name in ("input_path", "results_path", "summary_path"):
             object.__setattr__(self, name, Path(getattr(self, name)).expanduser())
 
@@ -267,11 +270,16 @@ def load_postgresql_dataset(
     *,
     session_factory: SessionFactory | None = None,
     page_size: int = 10_000,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    include_reading_ids: bool = False,
+    max_rows: int | None = None,
 ) -> pd.DataFrame:
     """Load a meter's ordered readings in bounded database pages.
 
     The returned DataFrame is materialized in memory to support historical
-    features and causal detectors. Page reads are bounded; the complete series
+    features and causal detectors. Optional bounds restrict the loaded interval
+    using [start, end) semantics. Page reads are bounded; the selected series
     is still required by this pipeline's current batch execution model.
     """
     if not meter_identifier.strip():
@@ -282,25 +290,37 @@ def load_postgresql_dataset(
         or not 1 <= page_size <= MAX_PAGE_SIZE
     ):
         raise ValueError(f"page_size must be between 1 and {MAX_PAGE_SIZE}.")
+    if max_rows is not None and (
+        isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows < 1
+    ):
+        raise ValueError("max_rows must be a positive integer or None.")
 
     factory = session_factory or create_session_factory()
     meters = MeterRepository()
     readings = ReadingRepository()
     records: list[dict[str, Any]] = []
     with factory() as session:
+        session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         meter = meters.get_by_identifier(session, meter_identifier)
         if meter is None:
             raise FileNotFoundError(f"Meter '{meter_identifier}' was not found in PostgreSQL.")
-        count = readings.count_for_meter(session, meter.id)
+        count = readings.count_for_meter(session, meter.id, start=start, end=end)
+        if max_rows is not None and count > max_rows:
+            raise ValueError(
+                f"Selected readings exceed the maximum permitted count of {max_rows:,}."
+            )
         for offset in range(0, count, page_size):
             page = readings.get_for_meter(
                 session,
                 meter.id,
                 limit=page_size,
                 offset=offset,
+                start=start,
+                end=end,
             )
             records.extend(
                 {
+                    **({"id": row.id} if include_reading_ids else {}),
                     "timestamp": row.timestamp,
                     **{column: getattr(row, column) for column in MEASUREMENT_COLUMNS},
                 }
@@ -309,6 +329,8 @@ def load_postgresql_dataset(
     if not records:
         raise ValueError(f"Meter '{meter_identifier}' has no stored readings.")
     frame = pd.DataFrame.from_records(records)
+    if include_reading_ids:
+        frame["id"] = frame["id"].astype("int64")
     logger.info(
         "Loaded %d database readings for meter %s.",
         len(frame),
@@ -389,6 +411,7 @@ def _make_result_records(
     available: np.ndarray,
     scores: np.ndarray,
     metadata: dict[str, Any],
+    include_normal_predictions: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     unavailable_reasons = metadata.pop("_unavailable_reasons", {})
@@ -400,7 +423,7 @@ def _make_result_records(
     for position in range(len(heldout)):
         prediction_available = bool(available[position])
         is_anomaly = bool(predictions[position]) if prediction_available else None
-        if prediction_available and not is_anomaly:
+        if prediction_available and not is_anomaly and not include_normal_predictions:
             continue
         reading = heldout.iloc[position]
         record: dict[str, Any] = {
@@ -422,7 +445,13 @@ def _make_result_records(
                     else None
                 ),
                 "anomaly_category": None,
-                "result_kind": "anomaly" if is_anomaly else "unavailable",
+                "result_kind": (
+                    "unavailable"
+                    if not prediction_available
+                    else "anomaly"
+                    if is_anomaly
+                    else "normal"
+                ),
                 "detector_metadata": _metadata_text(row_metadata),
             }
         )
@@ -707,6 +736,7 @@ def run_anomaly_pipeline(
             available=available,
             scores=scores,
             metadata=metadata,
+            include_normal_predictions=selected_config.include_normal_predictions,
         )
         results.extend(detector_rows)
         detector_summaries[detector_name] = {
@@ -748,7 +778,9 @@ def run_anomaly_pipeline(
             "not verified anomaly ground truth."
         ),
         "result_output_policy": (
-            "CSV contains anomaly-positive and unavailable results. Available normal "
+            "All available normal predictions are emitted."
+            if selected_config.include_normal_predictions
+            else "CSV contains anomaly-positive and unavailable results. Available normal "
             "predictions are omitted and counted per detector."
         ),
         "detectors": detector_summaries,
@@ -766,8 +798,14 @@ def run_anomaly_pipeline(
             "Synthetic labels are not used in inference; this run does not estimate "
             "real-world accuracy.",
             "The database reader materializes all ordered readings in memory.",
-            "Sparse CSV omits available normal predictions; detector counts in this "
-            "summary include them.",
+            *(
+                [
+                    "Sparse CSV omits available normal predictions; detector counts in this "
+                    "summary include them."
+                ]
+                if not selected_config.include_normal_predictions
+                else []
+            ),
         ],
     }
     logger.info(

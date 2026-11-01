@@ -22,7 +22,12 @@ identifier `uci_household_1`.
   Isolation Forest, evaluation utilities, and a chronological end-to-end detection pipeline.
 - `src/smartmeter/database/`: SQLAlchemy models, PostgreSQL connection/session management and repositories.
 - `src/smartmeter/services/database_ingestion.py`: streams Parquet row batches into PostgreSQL.
-- `src/smartmeter/api/`: FastAPI application foundation and database-independent health route.
+- `src/smartmeter/services/detection_service.py` and `detection_worker.py`: run and persist
+  durable detector jobs outside API request processes.
+- `src/smartmeter/api/`: FastAPI health, readings, detection-run, and anomaly endpoints.
+- `src/smartmeter_dashboard/`: separate Streamlit shell, typed HTTPX API client, configuration,
+  and Pandas response transformations. The dashboard communicates with FastAPI only and never
+  loads database credentials.
 - `alembic/`: versioned database schema migrations.
 - `tests/unit/` and `tests/integration/`: database-independent tests and opt-in real PostgreSQL tests.
 
@@ -40,11 +45,12 @@ Runtime dependencies are pinned in `requirements.txt`; the editable install incl
 tools from the `dev` extra. The Parquet pipeline and database importer require PyArrow, SQLAlchemy,
 Alembic, and Psycopg 3.
 
-## Milestone 4, Phase 1: API foundation
+## Milestone 4: API and persistent detection
 
-The API provides a database-independent liveness endpoint and a bounded, read-only readings
-endpoint. Importing the application does not open a database connection. OpenAPI is available at
-`/openapi.json`, Swagger UI at `/docs`, and ReDoc at `/redoc`.
+The API provides a database-independent liveness endpoint, bounded readings queries, durable
+detection-run submission and status, and paginated persisted predictions. Importing the application
+does not open a database connection. OpenAPI is available at `/openapi.json`, Swagger UI at `/docs`,
+and ReDoc at `/redoc`.
 
 Start the API from the project root or another working directory with:
 
@@ -56,6 +62,8 @@ The launcher reads `DATABASE_URL` from `.env` without displaying it, uses the pr
 environment, and runs without automatic reload. Stop any previous API instance before starting
 another one on port 8000. `/health` remains database-independent; `/readings` requires the
 configured, migrated PostgreSQL database.
+The API launcher binds to `127.0.0.1`; authentication is not implemented, so do not expose this
+development API to an untrusted network.
 
 The local API documentation and health URLs are:
 
@@ -81,6 +89,247 @@ half-open interval `[start, end)`. Results are ordered by timestamp and limited 
 per page. Responses preserve missing measurements as JSON `null` and include `has_more` and
 `next_offset` pagination fields. Reading requests require a configured, migrated PostgreSQL
 database; an unknown meter returns 404.
+
+Apply the additive detection schema migration before using detection endpoints. Run the migration
+from the project root after loading `DATABASE_URL` from `.env` into the current PowerShell session:
+
+```powershell
+$databaseUrlLine = Get-Content .env | Where-Object { $_ -match '^\s*DATABASE_URL\s*=' } | Select-Object -First 1
+if (-not $databaseUrlLine) { throw "DATABASE_URL is missing from .env" }
+$env:DATABASE_URL = (($databaseUrlLine -split '=', 2)[1]).Trim().Trim('"').Trim("'")
+.\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+The detection API rejects requested ranges longer than 90 days and any selection containing more
+than 100,000 readings. The worker independently enforces the reading-count limit before loading
+data, including for jobs not submitted through the API. At most one run per meter may be pending
+or running; competing submissions receive HTTP 409. Reading, detection-run, and anomaly pages
+allow at most 1,000 items and offsets up to 100,000. These safeguards bound one job and one query;
+they are not authentication, per-user quotas, or global request-rate limits.
+
+The detection migration is present at revision `20261031_0002` and is applied to the isolated
+`smartmeter_integration_test` database used for PostgreSQL verification and to the approved
+development database `smartmeter_db`. Both are at revision `20261031_0002`; `alembic check`
+reported no schema drift. The approved upgrade added the `detection_runs` and `anomaly_results`
+tables and their indexes/constraints; it did not drop or reset existing tables or readings.
+
+Verification on 1 November 2026: the full suite reported 180 passed and 10 PostgreSQL tests
+skipped without a test URL; the separate isolated PostgreSQL suite reported 10 passed. The live
+localhost API/worker verification against the isolated database returned HTTP 202 for a queued
+run, HTTP 409 for a duplicate active submission, then completed the run and persisted reconciled
+counts (1 anomaly, 4 normal, 1 unavailable) from 20 synthetic readings. `alembic current` reported
+`20261031_0002 (head)` and `alembic check` found no drift. Ruff lint/format, dependency checks,
+`check_project.ps1` (5/5), and Git whitespace checks passed. After owner approval, the development
+database was migrated and verified at `20261031_0002`; live localhost checks returned 200 for
+health, docs, OpenAPI, readings (2 records), detection-run listing, and anomaly listing.
+
+Submit a durable detection job. `start` is inclusive, `end` is exclusive, and supplied timestamps
+must include an ISO-8601 UTC offset:
+
+```powershell
+$body = @{
+  meter_identifier = "uci_household_1"
+  algorithm = "global_iqr"
+  start = "2006-12-16T00:00:00Z"
+  end = "2006-12-17T00:00:00Z"
+} | ConvertTo-Json
+$run = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/detection/runs" `
+  -ContentType "application/json" -Body $body
+$run
+```
+
+The API records a `pending` run and returns HTTP 202. It does not execute detector work in the
+request process. Start a worker in another PowerShell terminal after loading the same database URL
+from `.env`:
+
+```powershell
+$line = Get-Content .env | Where-Object { $_ -match '^\s*DATABASE_URL\s*=' } | Select-Object -First 1
+if (-not $line) { throw "DATABASE_URL is missing from .env" }
+$env:DATABASE_URL = (($line -split '=', 2)[1]).Trim().Trim('"').Trim("'")
+.\.venv\Scripts\python.exe -m smartmeter.services.detection_worker
+```
+
+The worker claims jobs with PostgreSQL row locks and expiring leases, renews leases while processing,
+and retries jobs after worker crashes up to three claims. Permanently failed jobs expose a safe
+failure message, not internal exception details. `--once` processes at most one available job.
+Optional `SMARTMETER_DETECTION_POLL_SECONDS`, `SMARTMETER_DETECTION_LEASE_SECONDS`, and
+`SMARTMETER_DETECTION_HEARTBEAT_SECONDS` settings tune worker polling and leases.
+
+Check a run and its persisted predictions with:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/detection/runs/$($run.run_id)"
+Invoke-RestMethod "http://127.0.0.1:8000/anomalies?run_id=$($run.run_id)&limit=100"
+Invoke-RestMethod "http://127.0.0.1:8000/anomalies/summary?run_id=$($run.run_id)"
+```
+
+`GET /anomalies` defaults to anomalous predictions; request `prediction_status=normal` or
+`prediction_status=unavailable` to inspect those categories. The summary describes exactly one run.
+If `run_id` is omitted, it selects the latest completed run, optionally filtered by meter, so
+repeated detection runs do not double-count readings. Run counters include training and held-out
+readings separately; only chronological held-out predictions are persisted. The detection pipeline
+currently materializes the selected range in memory, so each run is intentionally capped at
+100,000 readings. Use a smaller date range where possible.
+
+For containerized worker execution, start PostgreSQL and the detection profile (after applying
+migrations):
+
+```powershell
+docker compose --profile detection up -d postgres detection-worker
+docker compose logs -f detection-worker
+```
+
+## Milestone 5 Phase 1: Analytics API
+
+The read-only analytics endpoints provide SQL-aggregated dashboard data through the existing
+FastAPI service. Dashboard clients use the API and do not receive database credentials.
+
+- `GET /meters?limit=100&offset=0` returns meter identifiers, stored reading counts, and first
+  and last stored timestamps. It is paginated with a maximum page size of 1,000.
+- `GET /analytics/summary?meter_identifier=uci_household_1&start=...&end=...` returns the
+  reading count; active-power average, minimum, maximum, and latest non-null value/time; and
+  missing counts and rates for all seven measurement fields. `start` and `end` are optional
+  UTC-offset ISO-8601 boundaries using half-open `[start, end)` semantics.
+- `GET /analytics/timeseries?meter_identifier=uci_household_1&start=...&end=...&interval=hour`
+  returns PostgreSQL hourly (`hour`) or daily (`day`) bucket aggregates for all seven electrical
+  measurements. Both UTC-offset boundaries are required; the maximum range is 31 days and the
+  result is capped at 750 buckets.
+- `GET /analytics/quality?meter_identifier=uci_household_1&start=...&end=...` returns
+  database-observed missing counts/rates and internal timestamp-gap counts. Gap estimates assume
+  a one-minute expected cadence; gaps before the first or after the last in-scope reading are
+  not assessed. Ingestion-time validation findings are explicitly unavailable because they are
+  not stored per reading and cannot be reconstructed.
+
+Examples from PowerShell after starting the API:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/meters?limit=100"
+Invoke-RestMethod "http://127.0.0.1:8000/analytics/summary?meter_identifier=uci_household_1&start=2006-12-16T00:00:00Z&end=2006-12-17T00:00:00Z"
+Invoke-RestMethod "http://127.0.0.1:8000/analytics/timeseries?meter_identifier=uci_household_1&start=2006-12-16T00:00:00Z&end=2006-12-17T00:00:00Z&interval=hour"
+Invoke-RestMethod "http://127.0.0.1:8000/analytics/quality?meter_identifier=uci_household_1&start=2006-12-16T00:00:00Z&end=2006-12-17T00:00:00Z"
+```
+
+Verification on 1 November 2026: 15 focused analytics unit tests passed. The full suite reported
+195 passed and 11 PostgreSQL tests skipped without a test URL; the separate isolated
+`smartmeter_integration_test` run passed all 11 PostgreSQL tests. Ruff lint/format, `pip check`,
+Alembic drift check, and `git diff --check` passed. No database schema migration was needed.
+This completes the backend analytics API phase. The separate dashboard foundation is described
+below; the six analytics pages remain unimplemented.
+
+## Milestone 5 Phase 2: Dashboard foundation
+
+The separate `src/smartmeter_dashboard/` package contains dashboard configuration, a typed HTTPX
+client for health, meter coverage, analytics, detection runs, and anomalies, Pandas transformations,
+and a minimal Streamlit shell. The shell checks API availability and loads a meter selector; it
+provides navigation placeholders for the six dashboard sections, but does not yet implement their
+analytics content or charts.
+
+Install the optional dashboard dependencies into the project environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dashboard]"
+```
+
+In PowerShell, configure the API URL only if it differs from the local default, then run
+`streamlit` from the project venv in a separate terminal after starting the API with `run_api.ps1`:
+
+```powershell
+$env:SMARTMETER_API_BASE_URL = "http://127.0.0.1:8000"
+.\.venv\Scripts\python.exe -m streamlit run src\smartmeter_dashboard\app.py
+```
+
+`SMARTMETER_API_BASE_URL` defaults to `http://127.0.0.1:8000`. It must be an HTTP(S) base URL
+without embedded credentials, query parameters, or fragments. The dashboard does not read
+`DATABASE_URL`, open a PostgreSQL connection, or provide a database credential field. Dashboard
+tests use mocked HTTP responses and do not require a live API or PostgreSQL.
+
+Phase 2 verification on 1 November 2026: 21 dashboard-focused tests passed; the full suite
+reported 216 passed and 11 PostgreSQL tests skipped without a test URL. Ruff lint/format,
+`pip check`, and `git diff --check` passed. The optional dashboard extra installed Streamlit
+1.66.1 and Plotly 6.9.0, and reused HTTPX 0.28.1 in `.venv`.
+
+## Milestone 5 Phase 3: navigation and shared filters
+
+The dashboard now has sidebar navigation for Overview, Energy Analytics, Electrical Metrics,
+Anomaly Detection, Detection Runs, and Data Quality. Each section is a clearly identified
+placeholder; analytics content and charts are intentionally not implemented in this phase.
+
+Meter selection and the inclusive UTC date range are shared through Streamlit session state.
+The default is up to the latest seven days in the selected meter's actual coverage, with a
+seven-day fallback when coverage is unavailable. Date ranges are validated and capped at 31 days.
+The meter list is cached for five minutes to avoid repeat API calls during navigation; the visible
+Refresh data button clears that cache and reloads it. Date boundaries exposed for API use are
+UTC-midnight timestamps with an exclusive end.
+
+Reusable components provide the application header, API status, loading, empty, and error states.
+The dashboard continues to communicate only with FastAPI; it has no database connection or
+database credential access.
+
+Phase 3 verification on 1 November 2026: 37 dashboard-focused tests passed; the full suite
+reported 232 passed and 11 PostgreSQL integration tests skipped because no isolated test URL was
+configured. Ruff lint/format, `pip check`, and `git diff --check` passed. Tests used mocked API
+responses; no live API or database was required.
+
+## Milestone 5 Phase 4: core analytics pages
+
+Overview, Energy Analytics, and Electrical Metrics now use the shared meter and UTC date filters
+and fetch only the existing server-aggregated analytics endpoints. Successful summary, time-series,
+and per-meter anomaly-summary GET responses are cached for 60 seconds; failed responses are not
+cached. The Refresh data action clears these caches. Hourly buckets are bounded by the existing
+31-day request window and 750-bucket API response limit; no raw readings are downloaded.
+
+Overview displays reading-count, active-power average/maximum/latest KPIs, the API's missing-value
+counts and rates, a daily active-power/reading-volume chart, and (when available) the meter's
+latest completed detection-run summary. That anomaly summary is run-scoped and is not filtered by
+the selected date range. Energy Analytics displays selected-period average and peak power plus
+hourly and daily active-power and reading-count charts. Electrical Metrics provides hourly/daily
+trends for active and reactive power (kW), voltage (V), current intensity (A), and the three
+sub-metering measures (Wh). Null aggregate values remain chart gaps and are counted, not filled.
+
+The Anomaly Detection, Detection Runs, and Data Quality sections remain placeholders for Phase 5.
+
+Phase 4 verification on 1 November 2026: 47 dashboard-focused tests passed; the full suite
+reported 242 passed and 11 PostgreSQL integration tests skipped because no isolated test URL was
+configured. Ruff lint/format and `git diff --check` passed; `pip check` reported no broken
+requirements. Tests use mocked API responses. A live API check at
+`http://127.0.0.1:8000/health` could not connect, so live backend verification and screenshots
+were not available.
+
+## Milestone 5 Phase 5: detection and data-quality pages
+
+The six-section dashboard now includes API-backed Anomaly Detection, Detection Runs, and Data
+Quality pages. Anomaly results support shared meter/date filters, prediction-status/algorithm/
+category filtering, and bounded pagination; unavailable predictions are labeled separately from
+normal predictions. Detection Runs displays filtered run history and processing counts, including
+unavailable predictions. Data Quality displays database-computed missing-value statistics and
+timestamp-gap estimates, and explicitly reports when historical ingestion-time validation is not
+available.
+
+Shared KPI cards wrap long labels and values, data tables allocate more width to timestamps and
+identifiers, and status/chart helpers preserve the existing dark theme. Dense hourly charts reduce
+point markers and limit date ticks. Power metrics are labeled in kW; sub-metering is labeled as
+average Wh per source reading, not kWh. Missing aggregate values remain gaps, and unavailable
+predictions are never presented as normal. Dashboard requests continue to use FastAPI; no database
+access was added to the dashboard.
+
+The Overview treats only the API's explicit `No completed detection run found.` response as an
+expected empty state and caches that result for 60 seconds. Unknown-meter 404s and other API
+failures remain visible as errors. Refresh clears this summary cache so a newly completed run can
+appear immediately.
+
+Verification on 1 November 2026: 60 dashboard-focused tests passed; the full suite reported 255
+passed and 11 PostgreSQL integration tests skipped because no isolated test URL was configured.
+Ruff lint and format checks, `pip check`, and `git diff --check` passed. A live read-only API health
+check returned HTTP 200, and the dashboard returned HTTP 200. Browser verification against the
+running API navigated all six pages and confirmed the selected meter/date filters persisted. The
+live data showed 9,903 readings for the selected 20–26 November 2010 range; no detection-run
+summary was available for that meter. No database or `.env` changes were made.
+
+Anomaly-summary follow-up verification: focused dashboard/API tests passed (52 passed); the full
+suite reported 260 passed and 11 PostgreSQL integration tests skipped. Ruff lint/format, `pip
+check`, and `git diff --check` passed. The local API was unavailable during this follow-up, so
+the current database's summary response was not rechecked live.
 
 ## Milestone 1: data pipeline
 
@@ -464,11 +713,130 @@ Do not use `docker compose down -v` unless you explicitly intend to delete datab
 - **Migration command cannot connect:** set `DATABASE_URL` in the same PowerShell session before
   running Alembic.
 
+## Milestone 6.1: assistant configuration and analytics tool registry
+
+The `smartmeter.assistant` package provides opt-in configuration, provider-neutral Pydantic
+contracts, independent OpenAI and Ollama adapters, a fixed registry of read-only analytics tool
+definitions, and trusted bounded execution for those tools. Conversation orchestration, an
+assistant API route, and chat UI are not implemented.
+
+Provider selection is explicit. With `LLM_PROVIDER` unset, assistant functionality is unavailable;
+FastAPI startup does not load assistant configuration. Set `LLM_PROVIDER=openai` with
+`OPENAI_API_KEY` and `OPENAI_MODEL`, or set `LLM_PROVIDER=ollama` with `OLLAMA_MODEL` and an
+optional `OLLAMA_BASE_URL` (defaults to `http://127.0.0.1:11434`). There is no automatic provider
+fallback. `LLM_REQUEST_TIMEOUT` defaults to 30 seconds and must be between 1 and 120 seconds. API keys are
+held as Pydantic `SecretStr` values.
+
+The shared provider contract and adapters are synchronous to match the current synchronous
+FastAPI route/service pattern; synchronous route handlers run in FastAPI's worker pool. The
+interface contains no provider SDK types. Install only the provider you intend to use, or both:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[assistant-openai]"
+.\.venv\Scripts\python.exe -m pip install -e ".[assistant-ollama]"
+.\.venv\Scripts\python.exe -m pip install -e ".[assistant-openai,assistant-ollama]"
+```
+
+The `assistant-openai` extra uses the official OpenAI Python SDK and its Responses API. The
+`assistant-ollama` extra declares HTTPX explicitly and uses Ollama's `/api/chat` endpoint. Imports
+of either optional client library are lazy; importing the shared assistant package does not
+require either provider dependency. `create_provider()` selects only the configured provider and
+raises a safe actionable error if configuration or that provider's extra is missing. It never
+falls back to another provider.
+
+OpenAI uses `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL`. Ollama uses
+`LLM_PROVIDER=ollama`, `OLLAMA_MODEL`, and optionally `OLLAMA_BASE_URL` (default
+`http://127.0.0.1:11434`). A configured Ollama URL may be remote; the application does not start
+Ollama, download models, or probe model tool-calling support in advance. If a model/server rejects
+tool definitions, the adapter returns a safe `tool_calling_unsupported` error rather than
+retrying or switching providers. Both adapters enforce the configured model and
+`LLM_REQUEST_TIMEOUT` (1–120 seconds). OpenAI SDK retries are disabled; the adapters convert
+authentication, rate-limit, timeout, connection, HTTP, and malformed-response failures into
+sanitized provider errors without returning raw provider details.
+
+Provider adapters only translate messages, tool definitions, responses, and tool results; they do
+not execute tools. Provider output must still be validated by the fixed local tool registry and
+trusted executor. The adapters add no household readings, database URLs, credentials, or
+infrastructure details to requests. The later orchestrator must supply only approved, bounded
+content; callers should not put raw household readings or secrets in messages. Adapter tests use
+fake clients and do not call OpenAI, require an Ollama server, or download models.
+
+### M6.1 Step 2: read-only tool schemas and registry
+
+The immutable registry exposes exactly these operations:
+
+| Tool | Inputs | Structured output |
+|---|---|---|
+| `get_energy_summary` | Meter, start, end | Reading count, active-power average/min/max/latest, and missing-measurement counts/rates |
+| `get_energy_timeseries` | Meter, start, end, `hour` or `day` | Bounded buckets with reading counts and supported measurement averages/min/max |
+| `get_electrical_metrics` | Meter, start, end | Reading count and per-measurement non-null count, average, min/max, missing count/rate |
+| `get_data_quality` | Meter, start, end | Missing measurements, observed gaps, estimated missing intervals, and explicit data-availability limitations |
+| `get_anomaly_summary` | Meter, run ID, or both | Run status, processed/normal/anomaly/unavailable counts, anomaly rate, category/algorithm counts |
+| `get_detection_run_details` | Run ID | Run identity, meter, algorithm, status, timestamps, and prediction counts |
+| `compare_energy_periods` | Meter and start/end for both periods | Per-period reading count and active-power average/min/max; B-minus-A and percent changes |
+
+Tool arguments are validated locally by strict Pydantic v2 schemas: unexpected fields are
+rejected, meter identifiers follow the API's 1–100 character constraint, timestamps must include
+a UTC offset and are normalized to UTC, and analytics periods are bounded to 31 days. All date
+intervals use `[start, end)`. Time-series intervals are only `hour` or `day`, with a maximum of
+750 buckets. Period comparisons reject overlap. The registry performs exact-name lookup and
+argument validation only; it has no execution or dynamic handler-dispatch capability.
+
+The registry is deliberately read-only. Arbitrary SQL/Python, shell or filesystem access,
+database writes, meter/reading mutations, detection-job submission, configuration access, and
+environment inspection are not registered.
+
+Existing API behavior and data limitations remain authoritative. Electrical readings contain
+the seven persisted columns (`global_active_power`, `global_reactive_power`, `voltage`, `global_intensity`, and
+`sub_metering_1` through `sub_metering_3`). Electrical range-wide
+statistics use direct SQL aggregates over observations, not averages of time buckets. Quality
+data is computed from stored readings only: gap estimates assume one-minute sampling, boundary
+gaps are not assessed, and ingestion-time findings cannot be reconstructed. Anomaly summaries
+preserve the distinctions between unknown meters/runs, no completed run, non-completed runs, and
+completed runs with empty anomaly results. Detection-run tool results omit internal configuration
+and worker details. Period comparisons aggregate each interval independently using the existing
+summary query.
+
+### M6.1 Step 3: trusted read-only execution
+
+`AnalyticsToolExecutor` now runs the seven registered tools synchronously. Each request is
+validated against the fixed Pydantic schema before a short-lived SQLAlchemy session is opened;
+one session context is closed on success or exception. Dispatch uses fixed in-code name checks,
+never a supplied function, module, SQL statement, or handler. Results are projected to JSON-safe
+objects. Invalid arguments, unknown tools/meters/runs, missing completed runs, non-completed run
+summaries, database failures, unexpected internal errors, and unsafe serialization failures have
+distinct safe error codes.
+
+The tools return bounded summary/time-series, electrical measurement aggregates, observed data
+quality, completed-run anomaly counts, selected run details, and two-period energy comparisons.
+Electrical averages/minima/maxima are SQL aggregates over the underlying observations. Period
+comparisons run the same summary aggregation independently for each half-open interval and return
+period B minus period A differences. Percentage change is `(B - A) / A * 100`; it is `null` if
+the baseline is zero or either measurement is unavailable. Reading-count differences are also
+reported.
+
+Detection-run details intentionally omit configuration, worker lease/heartbeat fields, retry
+attempts, and internal error text. Anomaly summaries preserve the distinction between an unknown
+meter, no completed run, unknown run, and a known non-completed run. Quality output remains based
+only on database-observed data; timestamp-gap estimates assume one-minute sampling, do not assess
+boundary gaps, and cannot reconstruct ingestion-time validation.
+
+The execution layer does not submit detection jobs or expose mutation, SQL, Python, shell,
+filesystem, configuration, or environment-inspection capabilities. Orchestration, assistant API,
+conversation persistence, and chat UI remain unimplemented; this is not yet a user-facing LLM
+assistant.
+
 ## Current scope
 
 Milestones 1 and 2 cover ingestion, quality reporting, Parquet output, PostgreSQL persistence,
 migrations, and batch import. Milestone 3 includes statistical detectors, past-only feature
 engineering, controlled synthetic evaluation data, chronological evaluation, Isolation Forest,
-and the end-to-end detection pipeline. PostgreSQL pipeline input is supported but requires a
-configured database. FastAPI, dashboard, LLM integration, and complete Docker/CI deployment remain
-future milestones.
+and the end-to-end detection pipeline. Milestone 4 currently includes the FastAPI health/readings
+API, durable detection jobs, the standalone PostgreSQL worker, and persisted anomaly queries.
+Milestone 5 provides the analytics API and all six Streamlit dashboard sections, backed by shared
+meter/date filters and an HTTPX client. M6.1 Steps 1–3 establish optional provider configuration,
+provider-neutral contracts, a read-only analytics tool registry, and bounded trusted execution;
+provider adapters, orchestration, assistant API, and chat UI remain future work. PostgreSQL
+pipeline input requires a configured database. The API is local-only and
+has no authentication; authentication/authorization, global rate limiting, and complete Docker/CI
+deployment remain future work.

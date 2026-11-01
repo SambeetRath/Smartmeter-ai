@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from smartmeter.api.dependencies import get_db_session
+from smartmeter.api.limits import MAX_PAGE_OFFSET
 from smartmeter.api.schemas import ReadingsPageResponse
 from smartmeter.database.repositories import MeterRepository, ReadingRepository
 
@@ -37,7 +38,7 @@ def get_readings(
         datetime | None, Query(description="Exclusive ISO-8601 timestamp with offset")
     ] = None,
     limit: Annotated[int, Query(ge=1, le=1_000)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_PAGE_OFFSET)] = 0,
 ) -> ReadingsPageResponse:
     """Return one bounded, timestamp-ordered page of readings for a meter.
 

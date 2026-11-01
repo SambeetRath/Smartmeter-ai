@@ -301,7 +301,9 @@ def test_readings_pagination_and_maximum_page_size(api_reading_repositories):
     assert reading_repository.call["offset"] == 1
 
     too_large = asyncio.run(_get(app, _readings_url(limit=1001)))
+    too_deep = asyncio.run(_get(app, _readings_url(offset=100001)))
     assert too_large.status_code == 422
+    assert too_deep.status_code == 422
 
 
 def test_readings_allows_maximum_limit_of_1000(api_reading_repositories):
@@ -334,7 +336,10 @@ def test_import_does_not_require_database_configuration():
             (
                 "from smartmeter.api.main import app; "
                 "assert app.title == 'SmartMeter AI API'; "
-                "assert app.openapi()['paths'].get('/health') is not None"
+                "paths = app.openapi()['paths']; "
+                "assert paths.get('/health') is not None; "
+                "assert paths.get('/detection/runs') is not None; "
+                "assert paths.get('/anomalies/summary') is not None"
             ),
         ],
         cwd=PROJECT_ROOT,
