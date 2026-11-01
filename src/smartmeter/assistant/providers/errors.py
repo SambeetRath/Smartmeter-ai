@@ -45,13 +45,10 @@ def sanitize_provider_exception(error: Exception, provider: str) -> ProviderErro
         )
     if "Timeout" in error_name or isinstance(error, TimeoutError):
         return ProviderError("timeout", f"{provider} request timed out.")
-    if (
-        "Connection" in error_name
-        or "Connect" in error_name
-        or isinstance(error, ConnectionError)
-    ):
+    if "Connection" in error_name or "Connect" in error_name or isinstance(error, ConnectionError):
         return ProviderError(
             "connection_error",
-            f"Could not connect to {provider}; verify provider availability and its configured URL.",
+            f"Could not connect to {provider}; verify provider availability and its "
+            "configured URL.",
         )
     return ProviderError("provider_error", f"{provider} request failed.")

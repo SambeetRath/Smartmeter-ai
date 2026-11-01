@@ -107,7 +107,7 @@ class OllamaProvider:
     """Synchronous adapter for Ollama's HTTP ``/api/chat`` endpoint."""
 
     def __init__(self, config: AssistantConfig, *, client: Any | None = None) -> None:
-        if config.provider is not LLMProvider.OLLAMA:
+        if config.provider != LLMProvider.OLLAMA:
             raise ProviderConfigurationError("Ollama provider requires LLM_PROVIDER=ollama.")
         if config.ollama_model is None:
             raise ProviderConfigurationError("Ollama provider requires OLLAMA_MODEL.")
@@ -184,12 +184,19 @@ class OllamaProvider:
 
         try:
             payload = response.json()
-            return _normalize_response(payload, self._model)
+            normalized = _normalize_response(payload, self._model)
         except (TypeError, ValueError, ValidationError):
             raise ProviderError(
                 "malformed_response",
                 "Ollama returned a response that did not match the expected format.",
             ) from None
+        allowed_tool_names = {tool.name for tool in request.tools}
+        if any(call.name not in allowed_tool_names for call in normalized.tool_calls):
+            raise ProviderError(
+                "unapproved_tool_call",
+                "Ollama returned a tool call that was not included in the request.",
+            )
+        return normalized
 
     def close(self) -> None:
         """Close the HTTP client when its owning application is shut down."""
@@ -205,6 +212,4 @@ def _indicates_unsupported_tools(response: object) -> bool:
     if not isinstance(error_text, str):
         return False
     normalized = error_text.lower()
-    return "tool" in normalized and (
-        "support" in normalized or "unsupported" in normalized
-    )
+    return "tool" in normalized and ("support" in normalized or "unsupported" in normalized)

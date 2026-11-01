@@ -460,7 +460,12 @@ malformed-response errors are handled. Optional extras are `assistant-openai` an
 `assistant-ollama`; Ollama's configured endpoint may be remote, and model tool-call support is not
 assumed. Conversation orchestration, API routes, and chat UI remain deferred.
 
-Verification: pending.
+Verification on 1 November 2026: 70 focused contract/provider tests passed; the full suite
+reported 413 passed and 11 PostgreSQL tests skipped because no isolated test URL was configured.
+Compilation and import checks passed without initializing a database engine. Ruff lint/format,
+`pip check`, and `git diff --check` passed. The installed OpenAI SDK was 2.54.0; its
+`responses.create` signature was checked and OpenAI and Ollama requests were exercised through
+HTTPX mock transports only. No provider API, Ollama server, model download, or database was used.
 
 ### Milestone 7 — Docker, CI/CD and Deployment
 
@@ -530,8 +535,8 @@ performance.
 
 ## 8. Current Action Items
 
-- Continue M6.1 Step 4 — implement provider adapters and orchestration only after approving
-  provider data-handling and tool-authorization behavior.
+- Continue with M6.2 — implement bounded conversation orchestration that validates every provider
+  tool call through the fixed registry and limits provider-bound content.
 - Preserve the pipeline's chronological split, training-only fitted preprocessing, and no-label
   inference boundary when adding API endpoints.
 - Before release, consider a full-scale PostgreSQL-source pipeline benchmark and peak-memory

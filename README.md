@@ -754,12 +754,39 @@ retrying or switching providers. Both adapters enforce the configured model and
 authentication, rate-limit, timeout, connection, HTTP, and malformed-response failures into
 sanitized provider errors without returning raw provider details.
 
+Configure these variables in the process environment before creating a provider. Set exactly one
+provider; do not put credentials in source control or command history. For example, an OpenAI key
+can be entered using PowerShell's hidden prompt:
+
+```powershell
+$env:LLM_PROVIDER = "openai"
+$env:OPENAI_MODEL = "your-approved-model"
+$secureApiKey = Read-Host "OpenAI API key" -AsSecureString
+$credential = [System.Management.Automation.PSCredential]::new("OpenAI", $secureApiKey)
+$env:OPENAI_API_KEY = $credential.GetNetworkCredential().Password
+Remove-Variable secureApiKey, credential
+$env:LLM_REQUEST_TIMEOUT = "30"
+```
+
+For Ollama, use `$env:LLM_PROVIDER = "ollama"`, set `$env:OLLAMA_MODEL` to an already available
+model, and optionally set `$env:OLLAMA_BASE_URL`. The Ollama model must support tool calling to
+answer tool-based requests. Leaving `LLM_PROVIDER` unset leaves the assistant unavailable; an
+explicitly selected provider with missing configuration fails when provider creation is attempted.
+
 Provider adapters only translate messages, tool definitions, responses, and tool results; they do
 not execute tools. Provider output must still be validated by the fixed local tool registry and
-trusted executor. The adapters add no household readings, database URLs, credentials, or
-infrastructure details to requests. The later orchestrator must supply only approved, bounded
-content; callers should not put raw household readings or secrets in messages. Adapter tests use
-fake clients and do not call OpenAI, require an Ollama server, or download models.
+trusted executor. Calls transmit the supplied messages, tool definitions, and tool results to the
+selected endpoint: OpenAI's API or the exact configured Ollama URL, which may be remote. Adapters
+do not read or append database readings, credentials, or infrastructure details, but they cannot
+inspect arbitrary message content. The M6.2 orchestrator and its callers must not put raw household
+readings or secrets into provider requests. Adapter tests use fake clients and do not call OpenAI,
+require an Ollama server, or download models.
+
+Run the offline adapter tests with:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests\unit\test_assistant_providers.py
+```
 
 ### M6.1 Step 2: read-only tool schemas and registry
 

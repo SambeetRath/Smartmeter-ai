@@ -120,6 +120,8 @@ def _normalize_response(raw_response: object) -> ProviderResponse:
         finish_reason = CompletionReason.TOOL_CALLS
     elif refusal_found:
         finish_reason = CompletionReason.CONTENT_FILTER
+    elif status == "incomplete" and incomplete_reason == "content_filter":
+        finish_reason = CompletionReason.CONTENT_FILTER
     elif status == "incomplete" and incomplete_reason == "max_output_tokens":
         finish_reason = CompletionReason.LENGTH
     elif status == "completed":
@@ -142,7 +144,7 @@ class OpenAIProvider:
     """Synchronous adapter for the official OpenAI Responses API."""
 
     def __init__(self, config: AssistantConfig, *, client: Any | None = None) -> None:
-        if config.provider is not LLMProvider.OPENAI:
+        if config.provider != LLMProvider.OPENAI:
             raise ProviderConfigurationError("OpenAI provider requires LLM_PROVIDER=openai.")
         if config.openai_api_key is None or config.openai_model is None:
             raise ProviderConfigurationError(
@@ -193,12 +195,19 @@ class OpenAIProvider:
             raise sanitize_provider_exception(error, "OpenAI") from None
 
         try:
-            return _normalize_response(raw_response)
+            normalized = _normalize_response(raw_response)
         except (TypeError, ValueError, ValidationError, json.JSONDecodeError):
             raise ProviderError(
                 "malformed_response",
                 "OpenAI returned a response that did not match the expected format.",
             ) from None
+        allowed_tool_names = {tool.name for tool in request.tools}
+        if any(call.name not in allowed_tool_names for call in normalized.tool_calls):
+            raise ProviderError(
+                "unapproved_tool_call",
+                "OpenAI returned a tool call that was not included in the request.",
+            )
+        return normalized
 
     def close(self) -> None:
         """Close the SDK client when its owning application is shut down."""

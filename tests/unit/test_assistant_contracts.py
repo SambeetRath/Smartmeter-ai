@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import builtins
-import importlib
+import subprocess
 import sys
 
 import pytest
@@ -217,24 +216,28 @@ def test_provider_protocol_accepts_a_fake_implementation():
     assert provider.complete(_provider_request()).text == "Grounded response."
 
 
-def test_shared_assistant_package_imports_without_provider_sdk_imports(monkeypatch):
-    original_import = builtins.__import__
-
-    def guarded_import(name: str, *args: object, **kwargs: object):
-        if name.split(".", maxsplit=1)[0] in {"openai", "ollama"}:
-            raise AssertionError(f"Unexpected provider SDK import: {name}")
-        return original_import(name, *args, **kwargs)
-
-    for module_name in tuple(sys.modules):
-        if module_name == "smartmeter.assistant" or module_name.startswith("smartmeter.assistant."):
-            del sys.modules[module_name]
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-
-    package = importlib.import_module("smartmeter.assistant")
-
-    assert package.load_assistant_config({}) is None
-    assert "openai" not in sys.modules
-    assert "ollama" not in sys.modules
+def test_shared_assistant_package_imports_without_provider_sdk_imports():
+    script = """
+import builtins
+import importlib
+import sys
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name.split('.', 1)[0] in {'openai', 'ollama'}:
+        raise AssertionError(f'unexpected provider SDK import: {name}')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+package = importlib.import_module('smartmeter.assistant')
+assert package.load_assistant_config({}) is None
+assert 'openai' not in sys.modules
+assert 'ollama' not in sys.modules
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_fastapi_app_creation_does_not_require_assistant_configuration(monkeypatch):
